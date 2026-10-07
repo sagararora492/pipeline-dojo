@@ -1,0 +1,95 @@
+---
+title: Keep the latest row per key
+summary: Turn a stream of change records into the current state of each entity with row_number() and QUALIFY.
+track: sql
+order: 1
+prerequisites: []
+estimated_minutes: 15
+status: draft
+sources:
+  - title: "DuckDB docs: QUALIFY clause"
+    url: https://duckdb.org/docs/stable/sql/query_syntax/qualify
+    checked: pending review
+  - title: "DuckDB docs: window functions"
+    url: https://duckdb.org/docs/stable/sql/functions/window_functions
+    checked: pending review
+  - title: "PostgreSQL docs: SELECT, DISTINCT ON"
+    url: https://www.postgresql.org/docs/current/sql-select.html
+    checked: pending review
+  - title: "Snowflake docs: QUALIFY"
+    url: https://docs.snowflake.com/en/sql-reference/constructs/qualify
+    checked: pending review
+  - title: "BigQuery docs: QUALIFY clause"
+    url: https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#qualify_clause
+    checked: pending review
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './01-latest-row-per-key.exercises';
+
+Many pipelines don't receive the current state of a record. They receive a
+**change log** instead: one row each time an order is placed, shipped or
+cancelled. Delivery is often *at least once*, so the same change can arrive
+twice. Before you can report on orders, you need one row per order, holding its
+latest state.
+
+## Number the rows, then keep number 1
+
+The usual pattern has two steps:
+
+1. Number the rows **within each key**, newest first, with
+   `row_number() OVER (PARTITION BY key ORDER BY updated_at DESC)`.
+2. Keep the rows numbered 1.
+
+`row_number()` gives every row in a partition a different number, even when
+two rows are identical. That's what removes the duplicate delivery. `rank()`
+gives tied rows the same rank, so both copies would survive.
+
+You can't filter on a window function in `WHERE`, because `WHERE` runs before
+window functions are computed. DuckDB has a `QUALIFY` clause that filters on
+them directly:
+
+```sql
+SELECT *
+FROM order_changes
+QUALIFY row_number() OVER (PARTITION BY order_id ORDER BY updated_at DESC) = 1;
+```
+
+## Watch out for ties
+
+If two *different* rows share the latest `updated_at`, `row_number()` picks one
+of them, and which one isn't defined. [VERIFY: DuckDB docs on tie order in
+window frames.] Add a tie-breaker to the `ORDER BY`, such as a sequence number
+or ingestion offset, so the result is the same on every run.
+
+## In other databases
+
+| Database | `QUALIFY` | Alternative |
+|---|---|---|
+| DuckDB | Yes | `DISTINCT ON (order_id) ... ORDER BY order_id, updated_at DESC` also works |
+| PostgreSQL | No [VERIFY: still true in the current release] | Filter in an outer query, or use `DISTINCT ON` |
+| Snowflake | Yes | |
+| BigQuery | Yes [VERIFY: whether a WHERE, GROUP BY or HAVING clause is still required alongside it] | |
+
+The portable form works everywhere:
+
+```sql
+SELECT *
+FROM (
+  SELECT *, row_number() OVER (PARTITION BY order_id ORDER BY updated_at DESC) AS rn
+  FROM order_changes
+) AS numbered
+WHERE rn = 1;
+```
+
+That version returns the extra `rn` column. List the columns you want in the
+outer query to drop it.
+
+## Try it
+
+<SqlExercise exercise={exercises['sql-latest-order-state']}>
+  `order_changes` has one row per change to an order. Return the current state
+  of each order: one row per `order_id` with the `order_id`, `status`, `amount`
+  and `updated_at` of its latest change.
+</SqlExercise>
