@@ -4,8 +4,8 @@ An interactive, hands-on guide to data engineering. Learners read a short lesson
 then write SQL, Python or a data model, and get checked automatically. Everything
 runs in the browser. There is no backend, no account and no API key.
 
-**Status:** planning is done and implementation hasn't started. Start with
-milestone M0 below.
+**Status:** M0 (skeleton) is built on branch `m0-skeleton`, with one sample SQL
+lesson. Next: M1, the SQL track.
 
 ## Goals, in priority order
 
@@ -88,6 +88,7 @@ src/
   components/     # editor, exercise blocks, visualizers, schema builder
   app/            # routing, track pages, progress storage
 content/<track>/NN-slug.mdx
+content/<track>/NN-slug.exercises.ts   # exercises, run by tests/exercises.test.ts
 datasets/         # small seed CSV/Parquet files, with their origin documented
 research/<track>/ # shared research notes
 tests/
@@ -103,6 +104,20 @@ tests/
 - **M2 – Python** · **M3 – Data modelling** · **M4 – DSA for DE** · **M5 – Rust** ·
   **M6 – Polish** (search, progress dashboard, mobile layout, accessibility, the
   portfolio page).
+
+## How the SQL checker works
+
+- Each attempt runs in a fresh `ATTACH ':memory:'` database built from the
+  exercise's `setup`, so attempts can't affect each other.
+- The answer is wrapped in a temp view and every column is cast to `VARCHAR`,
+  so values compare in DuckDB's own text form (no Arrow decoding in JS).
+- Results are compared as multisets (duplicates count). Row order is checked only
+  when `ordered: true`, and column names only when `checkColumnNames: true`.
+- Tests use the blocking Node build of the same `@duckdb/duckdb-wasm` package
+  (`tests/helpers/duckdb-node.ts`). `tests/exercises.test.ts` also checks that
+  each lesson's `verified_against.duckdb` matches the engine's `version()`.
+- The engine version is pinned exactly in `package.json`. DuckDB-WASM 1.32.0
+  ships DuckDB v1.4.3.
 
 ## Conventions
 
