@@ -1,0 +1,161 @@
+---
+title: Joins that change row counts
+summary: Spot join fan-out before it inflates your totals, and find missing rows with anti-joins that survive NULLs.
+track: sql
+order: 2
+prerequisites: [sql/latest-row-per-key]
+estimated_minutes: 20
+status: draft
+sources:
+  - title: "PostgreSQL docs: table expressions, joined tables"
+    url: https://www.postgresql.org/docs/current/queries-table-expressions.html
+    checked: 2026-10-07, PostgreSQL 18.6
+  - title: "PostgreSQL docs: subquery expressions (EXISTS, NOT IN)"
+    url: https://www.postgresql.org/docs/current/functions-subquery.html
+    checked: 2026-10-07, PostgreSQL 18.6
+  - title: "PostgreSQL docs: row and array comparisons (NOT IN with a value list)"
+    url: https://www.postgresql.org/docs/current/functions-comparisons.html
+    checked: 2026-10-07, PostgreSQL 18.6
+  - title: "DuckDB docs: semi and anti joins"
+    url: https://duckdb.org/docs/current/sql/query_syntax/from.html#semi-and-anti-joins
+    checked: 2026-10-07, docs for the current DuckDB release
+  - title: "DuckDB docs: aggregate functions"
+    url: https://duckdb.org/docs/current/sql/functions/aggregates.html
+    checked: 2026-10-07, docs for the current DuckDB release
+  - title: "BigQuery docs: IN operator"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/operators#in_operators
+    checked: 2026-10-07, page last updated 2026-10-05
+  - title: "Snowflake docs: [ NOT ] IN"
+    url: https://docs.snowflake.com/en/sql-reference/functions/in
+    checked: 2026-10-07
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './02-joins-that-change-row-counts.exercises';
+
+A join doesn't just add columns. It can also **add rows** or **lose rows**, and
+neither one raises an error. A dashboard total that's quietly 60% too high
+usually comes from one of the two mistakes in this lesson.
+
+The `orders` (left) and `shipments` (right) tables below are used throughout. Order 101 was split across two
+shipments, order 103 hasn't shipped, and order 104 is a guest checkout with no
+`customer_id`.
+
+<div className="table-pair">
+
+| order_id | customer_id | order_total |
+|---|---|---|
+| 101 | 1 | 50.00 |
+| 102 | 1 | 30.00 |
+| 103 | 2 | 20.00 |
+| 104 | NULL | 15.00 |
+
+| order_id | shipped_at |
+|---|---|
+| 101 | 2024-06-01 |
+| 101 | 2024-06-03 |
+| 102 | 2024-06-02 |
+| 104 | 2024-06-02 |
+
+</div>
+
+## Fan-out: one row becomes many
+
+An inner join produces one output row for **every pair** of rows that match.
+The PostgreSQL docs put it this way: for each row of the first table, the
+joined table has a row for each row of the second table that satisfies the
+join condition. Order 101 matches two shipments, so it appears twice:
+
+```sql
+SELECT o.order_id, o.order_total, s.shipped_at
+FROM orders AS o
+JOIN shipments AS s ON s.order_id = o.order_id;
+-- 101 | 50.00 | 2024-06-01
+-- 101 | 50.00 | 2024-06-03   <- the same order again
+-- 102 | 30.00 | 2024-06-02
+-- 104 | 15.00 | 2024-06-02
+```
+
+Sum `order_total` over that result and order 101 counts twice. Before you
+join, ask: **for each row on my side, how many rows can match on the other
+side?** If the answer can be more than one, aggregate the other side down to
+one row per key first, then join.
+
+`sum(DISTINCT order_total)` looks like a fix, but it isn't. It also merges two
+*different* orders that happen to have the same total.
+
+### `count(*)` vs `count(column)` after a left join
+
+A `LEFT JOIN` keeps order 103 even though it has no shipments, and fills the
+shipment columns with NULL. `count(*)` counts that row, so order 103 looks like
+it has one shipment. `count(s.order_id)` counts only non-NULL values, so it
+correctly gives 0.
+
+<SqlExercise exercise={exercises['sql-order-value-and-shipments']}>
+  For each customer who has placed an order, return `customer_id`, the total
+  value of their orders (`total_value`) and how many shipments their orders
+  had (`shipment_count`). Ignore guest orders, which have no `customer_id`.
+  Customer 1 should have a total of 80.00 and 3 shipments.
+</SqlExercise>
+
+## Anti-joins: finding what's missing
+
+"Customers who have never ordered" is an **anti-join**: keep the rows on the
+left that have *no* match on the right. The obvious way to write it has a trap:
+
+```sql
+SELECT name FROM customers
+WHERE customer_id NOT IN (SELECT customer_id FROM orders);
+-- no rows!
+```
+
+The guest order puts a NULL into the subquery. `3 NOT IN (1, 1, 2, NULL)` asks
+whether 3 is unequal to *every* value, and SQL can't tell whether 3 equals
+NULL. So the result is NULL, not TRUE. The PostgreSQL docs say this directly:
+if no right-hand value is equal and at least one is NULL, `NOT IN` returns
+NULL. `WHERE` keeps only TRUE rows, so every customer disappears.
+
+Write anti-joins in a form that NULLs can't break:
+
+```sql
+-- NOT EXISTS: true when the subquery finds no row
+SELECT c.name FROM customers AS c
+WHERE NOT EXISTS (SELECT 1 FROM orders AS o WHERE o.customer_id = c.customer_id);
+
+-- LEFT JOIN, then keep the rows where nothing matched
+SELECT c.name FROM customers AS c
+LEFT JOIN orders AS o ON o.customer_id = c.customer_id
+WHERE o.order_id IS NULL;
+
+-- DuckDB also has explicit anti and semi joins
+SELECT c.name FROM customers AS c
+ANTI JOIN orders AS o ON o.customer_id = c.customer_id;
+```
+
+In the `LEFT JOIN` version, test a column of the *right* table that can't be
+NULL in a real match, such as its key. If you test a column that is sometimes
+NULL anyway, real matches look like misses.
+
+<SqlExercise exercise={exercises['sql-customers-without-orders']}>
+  Return the `customer_id` and `name` of every customer who has never placed
+  an order. The starter query uses `NOT IN`. Run it first and see what
+  happens.
+</SqlExercise>
+
+## In other databases
+
+| Database | `1 NOT IN (1, 2, NULL)` | `3 NOT IN (1, 2, NULL)` | Anti-join syntax |
+|---|---|---|---|
+| DuckDB 1.4 | FALSE | NULL | `ANTI JOIN`, `NOT EXISTS`, `LEFT JOIN … IS NULL` |
+| PostgreSQL 18 | FALSE | NULL | `NOT EXISTS`, `LEFT JOIN … IS NULL` |
+| BigQuery | FALSE | NULL | `NOT EXISTS`, `LEFT JOIN … IS NULL` |
+| Snowflake | NULL (per its docs) | NULL | `NOT EXISTS`, `LEFT JOIN … IS NULL` |
+
+Snowflake's docs show `1 NOT IN (1, 2, NULL)` returning NULL rather than
+FALSE. In a `WHERE` clause both results drop the row, so the anti-join trap
+behaves the same everywhere. `NOT EXISTS` is the safe, portable choice.
+
+DuckDB's docs describe its `ANTI JOIN` as having the same logic as `NOT IN`,
+except that it ignores NULL values from the right table. A semi or anti join
+also never returns more rows than the left table, so it can't fan out.

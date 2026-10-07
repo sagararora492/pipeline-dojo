@@ -53,6 +53,27 @@ describe('runInSandbox', () => {
     expect(r.rows).toEqual([['3']]);
   });
 
+  it('keeps concurrent attempts from interleaving', async () => {
+    // A runner whose calls yield to the event loop, like the browser worker.
+    const slow: SqlRunner = {
+      exec: async (sql) => {
+        await new Promise((r) => setTimeout(r, 1));
+        return runner.exec(sql);
+      },
+      query: async (sql) => {
+        await new Promise((r) => setTimeout(r, 1));
+        return runner.query(sql);
+      },
+    };
+    const other: SqlExercise = { ...exercise, setup: 'CREATE TABLE u (x INTEGER); INSERT INTO u VALUES (42);' };
+    const [a, b] = await Promise.all([
+      runInSandbox(slow, exercise, 'SELECT count(*) FROM t'),
+      runInSandbox(slow, other, 'SELECT x FROM u'),
+    ]);
+    expect(a.rows).toEqual([['3']]);
+    expect(b.rows).toEqual([['42']]);
+  });
+
   it('handles repeated column names', async () => {
     const r = await runInSandbox(runner, exercise, 'SELECT id, id FROM t WHERE id = 1');
     expect(r.rows).toEqual([['1', '1']]);
