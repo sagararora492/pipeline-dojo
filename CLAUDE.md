@@ -4,8 +4,8 @@ An interactive, hands-on guide to data engineering. Learners read a short lesson
 then write SQL, Python or a data model, and get checked automatically. Everything
 runs in the browser. There is no backend, no account and no API key.
 
-**Status:** M0 (skeleton) is built on branch `m0-skeleton`, with one sample SQL
-lesson. Next: M1, the SQL track.
+**Status:** M0 is merged and deployed to GitHub Pages. M1 (the SQL track) is in
+progress on `feat/m1-sql-track`; lessons 01–03 are drafted.
 
 ## Goals, in priority order
 
@@ -121,7 +121,9 @@ tests/
 
 ## Conventions
 
-- Commit messages end with the attribution line the session provides.
+- The user makes every commit. Claude leaves changes uncommitted, and doesn't
+  push, even when fixing CI.
+- Start each piece of work on a `feat/` branch cut from the latest `main`.
 - Open PRs against `main`; CI must pass before merging.
 - Don't push, create GitHub repos or change GitHub settings without the user's
   go-ahead.

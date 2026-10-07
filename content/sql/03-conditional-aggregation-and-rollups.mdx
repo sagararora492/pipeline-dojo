@@ -1,0 +1,154 @@
+---
+title: Conditional aggregation and rollups
+summary: Compute several filtered totals in one pass with FILTER, then add subtotals and grand totals with ROLLUP, and tell their NULLs apart with grouping().
+track: sql
+order: 3
+prerequisites: [sql/joins-that-change-row-counts]
+estimated_minutes: 20
+status: draft
+sources:
+  - title: "DuckDB docs: FILTER clause"
+    url: https://duckdb.org/docs/current/sql/query_syntax/filter.html
+    checked: 2026-10-07, docs for the current DuckDB release
+  - title: "DuckDB docs: GROUPING SETS, ROLLUP and CUBE"
+    url: https://duckdb.org/docs/current/sql/query_syntax/grouping_sets.html
+    checked: 2026-10-07, docs for the current DuckDB release
+  - title: "PostgreSQL docs: aggregate expressions"
+    url: https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES
+    checked: 2026-10-07, PostgreSQL 18.6
+  - title: "PostgreSQL docs: GROUPING SETS, CUBE and ROLLUP"
+    url: https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-GROUPING-SETS
+    checked: 2026-10-07, PostgreSQL 18.6
+  - title: "BigQuery docs: aggregate function calls"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aggregate-function-calls
+    checked: 2026-10-07, page last updated 2026-10-05
+  - title: "BigQuery docs: GROUP BY GROUPING SETS, ROLLUP and CUBE"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#group_by_grouping_sets
+    checked: 2026-10-07, page last updated 2026-10-05
+  - title: "Snowflake docs: GROUP BY GROUPING SETS"
+    url: https://docs.snowflake.com/en/sql-reference/constructs/group-by-grouping-sets
+    checked: 2026-10-07
+  - title: "Snowflake Migration Accelerator: Spark SQL GROUP BY"
+    url: https://docs.snowflake.com/en/migrations/sma-docs/translation-reference/spark-sql/spark-sql-dml/select/group-by
+    checked: 2026-10-07
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './03-conditional-aggregation-and-rollups.exercises';
+
+Reports rarely want one number per group. They want *paid* revenue next to
+*refunded* orders, then a subtotal per region and a grand total at the bottom.
+You could run one query per number and stitch the results together. This
+lesson does it in a single pass.
+
+Both exercises use this `sales` table. One sale has no region, because the
+pipeline couldn't resolve it.
+
+| order_id | region | channel | status | amount |
+|---|---|---|---|---|
+| 1 | EU | web | paid | 100.00 |
+| 2 | EU | web | paid | 50.00 |
+| 3 | EU | store | paid | 70.00 |
+| 4 | EU | web | refunded | 40.00 |
+| 5 | US | web | paid | 200.00 |
+| 6 | US | store | refunded | 30.00 |
+| 7 | APAC | store | refunded | 25.00 |
+| 8 | NULL | web | paid | 10.00 |
+
+## Filter inside the aggregate
+
+A `WHERE` clause filters rows for the *whole* query. When each column needs a
+different set of rows, filter inside each aggregate with `FILTER`:
+
+```sql
+SELECT region,
+       sum(amount) FILTER (WHERE status = 'paid')     AS paid_revenue,
+       count(*)    FILTER (WHERE status = 'refunded') AS refunded_orders
+FROM sales
+GROUP BY region;
+```
+
+Only the rows that pass a `FILTER` condition are fed to that aggregate. The
+other columns still see every row in the group.
+
+Two details catch people out:
+
+- **No rows means NULL for `sum`, but 0 for `count`.** APAC has no paid sales,
+  so its filtered `sum` is NULL. Wrap it in `coalesce(…, 0)` if the report
+  should show 0.00.
+- **`CASE WHEN` needs care.** `count(CASE WHEN status = 'refunded' THEN 1 END)`
+  works, because the missing `ELSE` gives NULL and `count` skips NULLs. Add
+  `ELSE 0` and `count` counts every row, since 0 isn't NULL. DuckDB's docs
+  also note that `FILTER` and `CASE WHEN` give different results for `list` and
+  `array_agg`: `CASE WHEN` leaves NULLs in the list, while `FILTER` removes them.
+
+<SqlExercise exercise={exercises['sql-paid-revenue-and-refunds']}>
+  Return one row per `region` with `paid_revenue` (the sum of `amount` for
+  paid sales, or 0.00 if there are none) and `refunded_orders` (how many sales
+  were refunded). Keep the sales with an unknown region as their own group.
+</SqlExercise>
+
+## Subtotals with ROLLUP
+
+`GROUP BY ROLLUP (region, channel)` runs several groupings at once:
+`(region, channel)`, then `(region)`, then `()` for the grand total. In general,
+`ROLLUP` groups by every prefix of its list, down to the empty list.
+`CUBE (region, channel)` groups by every *subset* instead, so it also adds a
+subtotal per channel. Both are shorthand for `GROUPING SETS`, which lists the
+groupings explicitly:
+
+```sql
+GROUP BY ROLLUP (region, channel)
+-- is the same as
+GROUP BY GROUPING SETS ((region, channel), (region), ())
+```
+
+In a subtotal row, the columns that were rolled up are shown as NULL. Here are
+the paid sales:
+
+| region | channel | revenue | |
+|---|---|---|---|
+| EU | web | 150.00 | detail |
+| EU | store | 70.00 | detail |
+| US | web | 200.00 | detail |
+| NULL | web | 10.00 | detail: the region really is unknown |
+| EU | NULL | 220.00 | EU subtotal |
+| US | NULL | 200.00 | US subtotal |
+| NULL | NULL | 10.00 | subtotal for the unknown region |
+| NULL | NULL | 430.00 | grand total |
+
+The last two rows look identical apart from the number. A NULL can mean
+"this column was rolled up" *or* "the data really is NULL".
+
+### `grouping()` tells the NULLs apart
+
+`grouping(col)` returns 1 when `col` was rolled up in that row, and 0 when it
+was grouped on. With several arguments it returns a bitmask in which the
+**last** argument is the lowest bit. So `grouping(region, channel)` is:
+
+- **0** for detail rows
+- **1** when only `channel` was rolled up (region subtotals)
+- **3** when both were rolled up (the grand total)
+
+<SqlExercise exercise={exercises['sql-revenue-rollup']}>
+  For paid sales only, return `region`, `channel` and `revenue` for every
+  region and channel combination, plus a subtotal row per region and a grand
+  total. Add a `level` column that is `'detail'`, `'region'` or `'total'`. The
+  unknown-region subtotal must be labelled `'region'`, not `'total'`.
+</SqlExercise>
+
+## In other databases
+
+| Database | Filter inside an aggregate | `GROUPING SETS` / `ROLLUP` / `CUBE` |
+|---|---|---|
+| DuckDB 1.4 | `sum(x) FILTER (WHERE …)` | Yes |
+| PostgreSQL 18 | `sum(x) FILTER (WHERE …)` | Yes |
+| BigQuery | `sum(x WHERE …)`, with the condition *inside* the parentheses | Yes |
+| Snowflake | `sum(CASE WHEN … THEN x END)` | Yes |
+
+BigQuery's syntax puts the `WHERE` inside the call, as in its own example
+`AVG(inches WHERE season IN ('spring', 'summer'))`. Snowflake's migration guide
+rewrites `FILTER` as a `CASE` expression. [VERIFY: whether Snowflake supports
+`FILTER` natively. No Snowflake page says so either way.] The `CASE WHEN … END`
+form, with no `ELSE`, works in all four databases.

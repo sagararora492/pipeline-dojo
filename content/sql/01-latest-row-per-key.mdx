@@ -8,20 +8,23 @@ estimated_minutes: 15
 status: draft
 sources:
   - title: "DuckDB docs: QUALIFY clause"
-    url: https://duckdb.org/docs/stable/sql/query_syntax/qualify
-    checked: pending review
+    url: https://duckdb.org/docs/current/sql/query_syntax/qualify.html
+    checked: 2026-10-07, docs for the current DuckDB release
   - title: "DuckDB docs: window functions"
-    url: https://duckdb.org/docs/stable/sql/functions/window_functions
-    checked: pending review
-  - title: "PostgreSQL docs: SELECT, DISTINCT ON"
+    url: https://duckdb.org/docs/current/sql/functions/window_functions.html
+    checked: 2026-10-07, docs for the current DuckDB release
+  - title: "DuckDB docs: SELECT clause, DISTINCT ON"
+    url: https://duckdb.org/docs/current/sql/query_syntax/select.html#distinct-on-clause
+    checked: 2026-10-07, docs for the current DuckDB release
+  - title: "PostgreSQL docs: SELECT"
     url: https://www.postgresql.org/docs/current/sql-select.html
-    checked: pending review
+    checked: 2026-10-07, PostgreSQL 18.6
   - title: "Snowflake docs: QUALIFY"
     url: https://docs.snowflake.com/en/sql-reference/constructs/qualify
-    checked: pending review
+    checked: 2026-10-07
   - title: "BigQuery docs: QUALIFY clause"
-    url: https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#qualify_clause
-    checked: pending review
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#qualify_clause
+    checked: 2026-10-07, page last updated 2026-10-05
 verified_against:
   duckdb: 1.4.3 (duckdb-wasm 1.32.0)
 ---
@@ -58,19 +61,24 @@ QUALIFY row_number() OVER (PARTITION BY order_id ORDER BY updated_at DESC) = 1;
 
 ## Watch out for ties
 
-If two *different* rows share the latest `updated_at`, `row_number()` picks one
-of them, and which one isn't defined. [VERIFY: DuckDB docs on tie order in
-window frames.] Add a tie-breaker to the `ORDER BY`, such as a sequence number
-or ingestion offset, so the result is the same on every run.
+If two *different* rows share the latest `updated_at`, `row_number()` still
+numbers them 1 and 2, but nothing in the query says which one gets 1. DuckDB's
+docs don't promise an order for tied rows, so don't rely on one. Add a
+tie-breaker to the `ORDER BY`, such as a sequence number or ingestion offset, so
+the result is the same on every run.
 
 ## In other databases
 
 | Database | `QUALIFY` | Alternative |
 |---|---|---|
 | DuckDB | Yes | `DISTINCT ON (order_id) ... ORDER BY order_id, updated_at DESC` also works |
-| PostgreSQL | No [VERIFY: still true in the current release] | Filter in an outer query, or use `DISTINCT ON` |
+| PostgreSQL 18 | No | Filter in an outer query, or use `DISTINCT ON` |
 | Snowflake | Yes | |
-| BigQuery | Yes [VERIFY: whether a WHERE, GROUP BY or HAVING clause is still required alongside it] | |
+| BigQuery | Yes | |
+
+`DISTINCT ON` keeps the first row of each group in `ORDER BY` order. Both the
+DuckDB and PostgreSQL docs warn that without an `ORDER BY`, which row you get is
+unpredictable.
 
 The portable form works everywhere:
 

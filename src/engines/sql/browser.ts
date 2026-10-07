@@ -20,8 +20,8 @@ async function start(): Promise<SqlRunner> {
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   const conn = await db.connect();
 
-  // The worker runs one query at a time per connection, so chain calls to
-  // keep a check's statements from interleaving with another check's.
+  // Send statements to the worker one at a time. Whole sandboxes are
+  // serialised separately, in check.ts.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(task: () => Promise<T>): Promise<T> => {
     const next = queue.then(task, task);

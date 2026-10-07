@@ -108,6 +108,7 @@ main { padding-top: 32px; padding-bottom: 48px; }
 .prose pre { background: var(--surface-2); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
 .prose :not(pre) > code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
 .prose table { border-collapse: collapse; font-size: 0.92rem; display: block; overflow-x: auto; }
+.table-pair { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .prose th, .prose td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
 
 .exercise { max-width: none; margin: 28px 0; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }

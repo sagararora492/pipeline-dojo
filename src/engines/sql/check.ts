@@ -25,16 +25,28 @@ export function normaliseQuery(sql: string): string {
 }
 
 let databaseCounter = 0;
+const locks = new WeakMap<SqlRunner, Promise<unknown>>();
+
+/**
+ * A sandbox switches the connection's current database with USE, so two
+ * sandboxes on one connection must never interleave. Queue them per runner.
+ */
+function exclusive<T>(runner: SqlRunner, task: () => Promise<T>): Promise<T> {
+  const previous = locks.get(runner) ?? Promise.resolve();
+  const next = previous.then(task, task);
+  locks.set(runner, next.catch(() => undefined));
+  return next;
+}
 
 /**
  * Run `sql` in a fresh in-memory database built from the exercise setup, so
  * one attempt can never change the data another attempt sees.
  */
-export async function runInSandbox(
-  runner: SqlRunner,
-  exercise: SqlExercise,
-  sql: string,
-): Promise<ResultSet> {
+export function runInSandbox(runner: SqlRunner, exercise: SqlExercise, sql: string): Promise<ResultSet> {
+  return exclusive(runner, () => runInSandboxNow(runner, exercise, sql));
+}
+
+async function runInSandboxNow(runner: SqlRunner, exercise: SqlExercise, sql: string): Promise<ResultSet> {
   const name = `sandbox_${++databaseCounter}`;
   await runner.exec(`ATTACH ':memory:' AS ${name}; USE ${name};`);
   try {

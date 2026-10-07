@@ -30,7 +30,7 @@ export function LessonPage() {
       </p>
       {lesson.status === 'draft' && (
         <p className="draft-note">
-          This lesson is a draft. It hasn't been reviewed yet, and claims marked [VERIFY] are still
+          This lesson is a draft and hasn't been reviewed yet. Any claim marked [VERIFY] is still
           unconfirmed.
         </p>
       )}
