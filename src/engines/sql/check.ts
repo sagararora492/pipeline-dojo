@@ -24,6 +24,37 @@ export function normaliseQuery(sql: string): string {
   return `\n${sql.trim()}\n`;
 }
 
+/**
+ * Make a DuckDB error message read well for a learner.
+ *
+ * - DuckDB 1.4.3 prints the "LINE n: … ^" context twice for parser errors, so
+ *   drop any block that repeats the one before it.
+ * - `lineOffset` lines of wrapper SQL come before the learner's query, so
+ *   shift line numbers back by that much, moving the caret by however many
+ *   characters the shorter number frees up.
+ */
+export function cleanErrorMessage(message: string, lineOffset = 0): string {
+  const blocks = message.split('\n\n').filter((block, i, all) => i === 0 || block !== all[i - 1]);
+  return blocks
+    .join('\n\n')
+    .replace(/^LINE (\d+): (.*)\n( *)\^/gm, (_, line: string, text: string, indent: string) => {
+      const shifted = String(Math.max(1, Number(line) - lineOffset));
+      const caretIndent = indent.slice(line.length - shifted.length);
+      return `LINE ${shifted}: ${text}\n${caretIndent}^`;
+    });
+}
+
+/** "1 row", "3 rows". */
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+/** Introduce sample rows: all of them after a colon, or a few "for example". */
+function listRows(rows: (string | null)[][]): string {
+  const shown = rows.slice(0, SAMPLE_ROWS).map(formatRow).join(', ');
+  return rows.length <= SAMPLE_ROWS ? `: ${shown}.` : `, for example ${shown}.`;
+}
+
 let databaseCounter = 0;
 const locks = new WeakMap<SqlRunner, Promise<unknown>>();
 
@@ -51,7 +82,13 @@ async function runInSandboxNow(runner: SqlRunner, exercise: SqlExercise, sql: st
   await runner.exec(`ATTACH ':memory:' AS ${name}; USE ${name};`);
   try {
     await runner.exec(exercise.setup);
-    await runner.exec(`CREATE TEMP VIEW __answer AS ${normaliseQuery(sql)}`);
+    const query = normaliseQuery(sql);
+    try {
+      await runner.exec(`CREATE TEMP VIEW __answer AS ${query}`);
+    } catch (error) {
+      // normaliseQuery puts the query on line 2, after the CREATE VIEW line.
+      throw new Error(cleanErrorMessage(error instanceof Error ? error.message : String(error), 1));
+    }
     // Casting to VARCHAR gives one canonical text form per value, using
     // DuckDB's own formatting, so DECIMAL, DATE and LIST values compare
     // without decoding Arrow types in JS. A projection over a view keeps the
@@ -80,7 +117,7 @@ export function compareResults(
 
   if (expected.columns.length !== actual.columns.length) {
     reasons.push(
-      `Expected ${expected.columns.length} column(s) (${expected.columns.join(', ')}) but got ${actual.columns.length} (${actual.columns.join(', ')}).`,
+      `Expected ${plural(expected.columns.length, 'column')} (${expected.columns.join(', ')}) but got ${actual.columns.length} (${actual.columns.join(', ')}).`,
     );
     return reasons;
   }
@@ -91,7 +128,7 @@ export function compareResults(
     }
   }
   if (expected.rows.length !== actual.rows.length) {
-    reasons.push(`Expected ${expected.rows.length} row(s) but got ${actual.rows.length}.`);
+    reasons.push(`Expected ${plural(expected.rows.length, 'row')} but got ${actual.rows.length}.`);
   }
 
   // Multiset difference: duplicates matter, so count rows instead of using a Set.
@@ -113,14 +150,11 @@ export function compareResults(
   });
 
   if (missing.length > 0) {
-    reasons.push(
-      `${missing.length} expected row(s) are missing, for example ${missing.slice(0, SAMPLE_ROWS).map(formatRow).join(', ')}.`,
-    );
+    const verb = missing.length === 1 ? 'is' : 'are';
+    reasons.push(`${plural(missing.length, 'expected row')} ${verb} missing${listRows(missing)}`);
   }
   if (extra.length > 0) {
-    reasons.push(
-      `${extra.length} row(s) shouldn't be there, for example ${extra.slice(0, SAMPLE_ROWS).map(formatRow).join(', ')}.`,
-    );
+    reasons.push(`${plural(extra.length, 'row')} shouldn't be there${listRows(extra)}`);
   }
 
   if (reasons.length === 0 && options.ordered) {
