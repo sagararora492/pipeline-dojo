@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { checkSqlAnswer, compareResults, normaliseQuery, runInSandbox } from '../src/engines/sql/check';
+import { checkSqlAnswer, cleanErrorMessage, compareResults, normaliseQuery, runInSandbox } from '../src/engines/sql/check';
 import type { SqlExercise, SqlRunner } from '../src/engines/sql/types';
 import { createNodeRunner } from './helpers/duckdb-node';
 
@@ -26,6 +26,42 @@ describe('normaliseQuery', () => {
   it('rejects empty input and multiple statements', () => {
     expect(() => normaliseQuery('  -- nothing\n')).toThrow(/Write a query/);
     expect(() => normaliseQuery('select 1; drop table t')).toThrow(/single query/);
+  });
+});
+
+describe('error messages', () => {
+  const errorFor = async (sql: string) => {
+    const result = await checkSqlAnswer(runner, exercise, sql);
+    if (result.status !== 'error') throw new Error(`expected an error, got ${result.status}`);
+    return result.message;
+  };
+
+  it('shows a parser error position once, on the learner’s own line', async () => {
+    const message = await errorFor('SELECT id\nFROM t\nWHER id = 1');
+    expect(message.match(/LINE /g)).toHaveLength(1);
+    expect(message).toContain('LINE 3: WHER id = 1');
+    // DuckDB reads WHER as a table alias, so the error is at "id". The caret
+    // must still sit under the token the message names.
+    const token = /near "([^"]+)"/.exec(message)?.[1] ?? '';
+    const [lineText, caret] = message.slice(message.indexOf('LINE 3')).split('\n');
+    expect(token).toBe('id');
+    expect(caret?.indexOf('^')).toBe((lineText ?? '').indexOf(` ${token} `) + 1);
+  });
+
+  it('shifts binder error positions too', async () => {
+    const message = await errorFor('SELECT missing_column FROM t');
+    expect(message).toContain('LINE 1: SELECT missing_column FROM t');
+  });
+
+  it('keeps the caret aligned when the line number loses a digit', () => {
+    const raw = 'Parser Error: oops\n\nLINE 10: SELEC 1\n          ^';
+    expect(cleanErrorMessage(raw, 1)).toBe('Parser Error: oops\n\nLINE 9: SELEC 1\n         ^');
+  });
+
+  it('leaves messages without positions alone', () => {
+    expect(cleanErrorMessage('Parser Error: syntax error at end of input', 1)).toBe(
+      'Parser Error: syntax error at end of input',
+    );
   });
 });
 
@@ -95,6 +131,21 @@ describe('compareResults', () => {
     const actual = { columns: ['b'], rows: expected.rows };
     expect(compareResults(expected, actual)).toEqual([]);
     expect(compareResults(expected, actual, { checkColumnNames: true })).not.toEqual([]);
+  });
+  it('uses singular and plural wording', () => {
+    expect(compareResults(expected, { columns: ['a'], rows: [['1'], ['2'], ['9']] })).toEqual([
+      '1 expected row is missing: (1).',
+      "1 row shouldn't be there: (9).",
+    ]);
+    expect(compareResults({ columns: ['a'], rows: [['1']] }, { columns: ['a', 'b'], rows: [] })).toEqual([
+      'Expected 1 column (a) but got 2 (a, b).',
+    ]);
+    const many = { columns: ['a'], rows: [['5'], ['6'], ['7'], ['8']] };
+    expect(compareResults(expected, many)).toEqual([
+      'Expected 3 rows but got 4.',
+      '3 expected rows are missing: (1), (1), (2).',
+      "4 rows shouldn't be there, for example (5), (6), (7).",
+    ]);
   });
 });
 
