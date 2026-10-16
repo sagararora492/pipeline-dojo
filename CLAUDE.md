@@ -34,6 +34,11 @@ progress on `feat/m1-sql-track`; lessons 01–03 are drafted.
   smoke test per track.
 - **Deployment:** GitHub Pages for this repo, built by GitHub Actions. Set Vite's
   `base` so the site works under `/pipeline-dojo/`.
+- **Security:** the build adds a Content Security Policy `<meta>` tag (in
+  `vite.config.ts`) that limits scripts and network requests to the site itself.
+  Engine workers start from a `blob:` URL so the policy covers them too; keep that
+  for Pyodide. A new outside host needs a deliberate policy change. Workflow
+  actions are pinned to commit SHAs and kept current by Dependabot.
 
 ## Tracks and how each is checked
 

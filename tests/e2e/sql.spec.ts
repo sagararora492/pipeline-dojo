@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { expect, test, type Page } from '@playwright/test';
 
 async function replaceAnswer(page: Page, sql: string) {
@@ -36,4 +38,33 @@ test('solves the sample SQL exercise offline, end to end', async ({ page }) => {
   // Progress survives a reload.
   await page.reload();
   await expect(page.getByText('✓ Solved')).toBeVisible();
+});
+
+test('learner SQL cannot reach other origins', async ({ page }) => {
+  // Another origin on localhost, so the route guard above lets it through and
+  // only the site's Content Security Policy can stop DuckDB from reaching it.
+  let hits = 0;
+  const server = createServer((_request, response) => {
+    hits += 1;
+    response.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'text/plain' });
+    response.end('reachable');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    await page.goto('./#/sql/latest-row-per-key');
+    const run = page.getByRole('button', { name: 'Run' });
+    await expect(run).toBeEnabled({ timeout: 30_000 });
+
+    await replaceAnswer(page, `SELECT content FROM read_text('http://localhost:${port}/data.txt')`);
+    await run.click();
+
+    await expect(page.locator('.feedback-error')).toBeVisible();
+    await expect(page.getByText('reachable', { exact: true })).toHaveCount(0);
+    expect(hits).toBe(0);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
