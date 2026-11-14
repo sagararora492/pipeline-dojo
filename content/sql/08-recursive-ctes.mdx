@@ -1,0 +1,138 @@
+---
+title: Recursive CTEs
+summary: Walk a dependency graph with WITH RECURSIVE, and handle tables that can be reached by more than one path.
+track: sql
+order: 8
+prerequisites: [sql/joins-that-change-row-counts]
+estimated_minutes: 25
+status: draft
+sources:
+  - title: "PostgreSQL docs: WITH queries (common table expressions)"
+    url: https://www.postgresql.org/docs/current/queries-with.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "DuckDB docs: WITH clause"
+    url: https://duckdb.org/docs/2.0/sql/query_syntax/with.html
+    checked: 2026-11-14, DuckDB 2.0 docs; behaviour re-checked on the pinned 1.4.3 engine
+  - title: "Snowflake docs: WITH"
+    url: https://docs.snowflake.com/en/sql-reference/constructs/with
+    checked: 2026-11-14
+  - title: "BigQuery docs: work with recursive CTEs"
+    url: https://docs.cloud.google.com/bigquery/docs/recursive-ctes
+    checked: 2026-11-14
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './08-recursive-ctes.exercises';
+
+"If I change `raw_customers`, what breaks?" The answer is every table that
+reads it, every table that reads those, and so on. A join finds one step. You
+don't know in advance how many steps there are, so you can't write that many
+joins.
+
+A **recursive CTE** repeats a step until it finds nothing new.
+
+The `dependencies` table has one row per edge of a pipeline: `downstream_table`
+reads from `upstream_table`.
+
+| upstream_table | downstream_table |
+|---|---|
+| raw_orders | stg_orders |
+| raw_customers | stg_customers |
+| stg_orders | fct_orders |
+| stg_customers | fct_orders |
+| stg_customers | dim_customers |
+| fct_orders | rpt_revenue |
+| dim_customers | rpt_revenue |
+| stg_orders | rpt_revenue |
+
+## Two queries joined by a `UNION`
+
+A recursive CTE has a fixed shape. The PostgreSQL docs describe it as "a
+non-recursive term, then `UNION` (or `UNION ALL`), then a recursive term, where
+only the recursive term can contain a reference to the query's own output".
+
+```sql
+WITH RECURSIVE reachable(table_name) AS (
+  -- Start: the tables that read raw_customers directly.
+  SELECT downstream_table
+  FROM dependencies
+  WHERE upstream_table = 'raw_customers'
+
+  UNION
+
+  -- Step: the tables that read anything found in the previous round.
+  SELECT d.downstream_table
+  FROM dependencies AS d
+  JOIN reachable AS r ON d.upstream_table = r.table_name
+)
+SELECT table_name FROM reachable;
+```
+
+The database runs the start query once. Then it runs the step query again and
+again, each time using only the rows the previous round produced. It stops when
+a round produces no rows.
+
+| Round | New rows |
+|---|---|
+| Start | stg_customers |
+| 1 | fct_orders, dim_customers |
+| 2 | rpt_revenue |
+| 3 | (none, so it stops) |
+
+## `UNION` or `UNION ALL`
+
+`rpt_revenue` reads both `fct_orders` and `dim_customers`, so round 2 finds it
+twice, once along each path.
+
+- With **`UNION ALL`**, both rows are kept. You get one row per **path**.
+- With **`UNION`**, duplicates are removed. The PostgreSQL docs say that for
+  `UNION` the database discards "duplicate rows and rows that duplicate any
+  previous result row". You get one row per **table**.
+
+Removing duplicates stops working once you add a column that differs between
+paths. If you track the depth, `(rpt_revenue, 2)` and `(rpt_revenue, 3)` are
+different rows, and `UNION` keeps both. Then you decide in the final `SELECT`
+which one you want, for example with `min(depth)`.
+
+<SqlExercise exercise={exercises['sql-downstream-tables']}>
+  Return the name (`table_name`) of every table downstream of `raw_customers`,
+  at any number of steps. Return each table once, and don't include
+  `raw_customers` itself.
+</SqlExercise>
+
+<SqlExercise exercise={exercises['sql-downstream-depth']}>
+  For every table downstream of `raw_orders`, return `table_name` and `depth`:
+  the smallest number of steps needed to reach it. `stg_orders` is at depth 1.
+  The starter query returns one row per path.
+</SqlExercise>
+
+## Cycles never finish
+
+The recursion stops only when a round produces no rows. If the data has a
+cycle, where A reads B and B reads A, a `UNION ALL` query keeps going round it.
+The PostgreSQL docs warn that you must "be sure that the recursive part of the
+query will eventually return no tuples, or else the query will loop
+indefinitely", and DuckDB's say the same: "if the graph has cycles, the query
+must perform cycle detection to prevent infinite loops."
+
+`UNION` ends a cycle when the rows are identical, because the second visit adds
+nothing new. With a depth column the rows differ on every lap, so `UNION`
+doesn't help. Add a limit to the step query instead, such as
+`WHERE r.depth < 20`.
+
+The exercises here use a graph with no cycles, so every query finishes.
+
+## In other databases
+
+| Database | Keyword | Set operator | Guard against endless recursion |
+|---|---|---|---|
+| DuckDB 1.4 | `WITH RECURSIVE` (required) | `UNION` or `UNION ALL` | none documented; write your own |
+| PostgreSQL 18 | `WITH RECURSIVE` | `UNION` or `UNION ALL` | none; write your own |
+| Snowflake | `RECURSIVE` is optional | docs say to use `UNION ALL`, not `UNION` | the statement timeout |
+| BigQuery | `WITH RECURSIVE` | `UNION ALL` in every documented example | fails after 500 iterations |
+
+In Snowflake, write the first exercise with `UNION ALL` and remove duplicates
+in the final query with `SELECT DISTINCT`. [VERIFY: whether BigQuery accepts
+`UNION DISTINCT` in a recursive CTE. Its guide uses `UNION ALL` throughout but
+doesn't say other operators are rejected.]

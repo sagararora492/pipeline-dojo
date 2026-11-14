@@ -1,0 +1,133 @@
+---
+title: Turn changes into history (SCD type 2)
+summary: Build a history table with a validity range per version using lead(), and query it as of any date.
+track: sql
+order: 6
+prerequisites: [sql/running-totals-and-lag]
+estimated_minutes: 20
+status: draft
+sources:
+  - title: "Kimball Group: dimensional modeling techniques, Type 2: add new row"
+    url: https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/type-2/
+    checked: 2026-11-14
+  - title: "PostgreSQL docs: window functions (lag, lead)"
+    url: https://www.postgresql.org/docs/current/functions-window.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "PostgreSQL docs: comparison functions and operators (BETWEEN)"
+    url: https://www.postgresql.org/docs/current/functions-comparison.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "DuckDB docs: window functions"
+    url: https://duckdb.org/docs/2.0/sql/functions/window_functions
+    checked: 2026-11-14, DuckDB 2.0 docs; behaviour re-checked on the pinned 1.4.3 engine
+  - title: "Snowflake docs: LEAD"
+    url: https://docs.snowflake.com/en/sql-reference/functions/lead
+    checked: 2026-11-14
+  - title: "BigQuery docs: navigation functions (LEAD)"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/navigation_functions
+    checked: 2026-11-14
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './06-history-tables-scd2.exercises';
+
+Lesson 1 turned a change log into the **current** state of each record. That
+answers "what plan is this customer on?" It can't answer "what plan were they
+on in March?", because the older rows were thrown away.
+
+A history table keeps them. Each change adds a new row instead of replacing the
+old one, and each row says when it was true. Kimball calls this a **type 2**
+slowly changing dimension: changes "add a new row in the dimension with the
+updated attribute values". Kimball recommends at least three extra columns on
+each row: an effective date, an expiration date and a current row indicator.
+This lesson calls them `valid_from`, `valid_to` and `is_current`.
+
+## From a change log to validity ranges
+
+`plan_changes` has one row each time a customer's plan changed:
+
+| customer_id | plan | changed_on |
+|---|---|---|
+| 1 | free | 2024-01-10 |
+| 1 | pro | 2024-03-01 |
+| 1 | team | 2024-06-15 |
+| 2 | pro | 2024-02-20 |
+| 2 | free | 2024-05-05 |
+
+A version starts on its own `changed_on`. It ends when the same customer's
+**next** version starts. `lead()` is `lag()` in the other direction: it returns
+a value from the next row of the partition, or NULL when there is no next row.
+
+```sql
+SELECT customer_id,
+       plan,
+       changed_on AS valid_from,
+       lead(changed_on) OVER (PARTITION BY customer_id ORDER BY changed_on) AS valid_to
+FROM plan_changes;
+```
+
+| customer_id | plan | valid_from | valid_to |
+|---|---|---|---|
+| 1 | free | 2024-01-10 | 2024-03-01 |
+| 1 | pro | 2024-03-01 | 2024-06-15 |
+| 1 | team | 2024-06-15 | NULL |
+
+The latest version has no next row, so its `valid_to` is NULL. That NULL is
+what marks the row as current.
+
+### The end date is not included
+
+Customer 1's free version ends on 2024-03-01, and the pro version starts on
+2024-03-01. On that day the customer is on pro. So a version is valid from
+`valid_from` **up to, but not including,** `valid_to`.
+
+Ranges built this way never overlap and never leave a gap: every date belongs
+to exactly one version.
+
+<SqlExercise exercise={exercises['sql-build-plan-history']}>
+  From `plan_changes`, return one row per version with `customer_id`, `plan`,
+  `valid_from`, `valid_to` (the date the customer's next version starts, or
+  NULL) and `is_current` (true for the customer's latest version).
+</SqlExercise>
+
+## Query the table as of a date
+
+To see the state on a given day, keep the versions whose range contains it:
+
+```sql
+WHERE valid_from <= DATE '2024-03-01'
+  AND (valid_to > DATE '2024-03-01' OR valid_to IS NULL)
+```
+
+Two mistakes are common here.
+
+**`BETWEEN`.** `d BETWEEN valid_from AND valid_to` reads well, but `BETWEEN`
+includes both ends. The PostgreSQL docs say it "treats the endpoint values as
+included in the range". On a change date, the old version and the new one both
+match, and the customer appears twice.
+
+**The NULL end date.** For a current row, `valid_to > DATE '2024-03-01'` is
+NULL, not true, so the row is dropped. Test for NULL as well.
+
+<SqlExercise exercise={exercises['sql-plan-as-of-date']}>
+  `customer_plan_history` is the table from the previous exercise. Return the
+  `customer_id` and `plan` of every customer as of 2024-03-01. Customers who
+  had no plan yet on that day shouldn't appear.
+</SqlExercise>
+
+## In other databases
+
+| Database | `lead(x)` defaults |
+|---|---|
+| DuckDB | offset 1, default NULL |
+| PostgreSQL 18 | offset 1, default NULL |
+| Snowflake | offset 1, default NULL |
+| BigQuery | offset 1, default NULL |
+
+The queries in this lesson use only `lead()` and comparison operators, and all
+four databases document them the same way.
+
+Some teams store a far-future date such as 9999-12-31 in `valid_to` instead of
+NULL. Then the range test needs no `IS NULL` branch, but every query that asks
+"is this row current?" has to know the magic date. Either works. Pick one and
+use it in every history table.
