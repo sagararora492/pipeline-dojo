@@ -23,14 +23,17 @@ INSERT INTO orders VALUES
   (101, 1,    50.00),
   (102, 1,    30.00),
   (103, 2,    20.00),
-  (104, NULL, 15.00);
+  (104, NULL, 15.00),
+  -- Same total as order 103, so sum(DISTINCT order_total) merges the two.
+  (105, 2,    20.00);
 
 -- Order 101 was split across two shipments; order 103 hasn't shipped.
 INSERT INTO shipments VALUES
   (101, DATE '2024-06-01'),
   (101, DATE '2024-06-03'),
   (102, DATE '2024-06-02'),
-  (104, DATE '2024-06-02');
+  (104, DATE '2024-06-02'),
+  (105, DATE '2024-06-04');
 `;
 
 export const exercises = defineSqlExercises({
@@ -68,16 +71,24 @@ GROUP BY o.customer_id
               WHERE o.customer_id IS NOT NULL GROUP BY o.customer_id`,
       },
       {
-        why: 'An inner join drops customer 2, whose only order hasn’t shipped.',
+        why: 'An inner join drops order 103, which hasn’t shipped, so customer 2 totals 20.00 instead of 40.00.',
         sql: `WITH sp AS (SELECT order_id, count(*) AS n FROM shipments GROUP BY order_id)
               SELECT o.customer_id, sum(o.order_total), sum(sp.n)
               FROM orders o JOIN sp ON sp.order_id = o.order_id
               WHERE o.customer_id IS NOT NULL GROUP BY o.customer_id`,
       },
       {
-        why: 'count(*) counts the NULL-extended row from the left join, so customer 2 shows 1 shipment instead of 0.',
-        sql: `SELECT o.customer_id, sum(DISTINCT o.order_total), count(*)
+        why: 'sum(DISTINCT) hides the fan-out for customer 1, but orders 103 and 105 are both 20.00, so customer 2 totals 20.00 instead of 40.00.',
+        sql: `SELECT o.customer_id, sum(DISTINCT o.order_total), count(s.order_id)
               FROM orders o LEFT JOIN shipments s ON s.order_id = o.order_id
+              WHERE o.customer_id IS NOT NULL GROUP BY o.customer_id`,
+      },
+      {
+        why: 'count(*) counts the NULL-extended row for unshipped order 103, so customer 2 shows 2 shipments instead of 1.',
+        sql: `SELECT o.customer_id, sum(o.order_total),
+                     (SELECT count(*) FROM orders o2 LEFT JOIN shipments s ON s.order_id = o2.order_id
+                      WHERE o2.customer_id = o.customer_id)
+              FROM orders o
               WHERE o.customer_id IS NOT NULL GROUP BY o.customer_id`,
       },
       {

@@ -42,6 +42,12 @@ Probe with `c(id) = {1, 2, 3}` and `o(cid) = {1, 1, NULL}`:
 
 The exercises in `02-joins-that-change-row-counts.exercises.ts` encode these behaviours as known-wrong answers, so CI re-checks them on every engine upgrade.
 
+## Review (2026-11-14)
+
+- **Exercise bug fixed.** The lesson says `sum(DISTINCT order_total)` isn't a fix for fan-out, but the exercise data couldn't show it: no customer had two orders with the same total, so `sum(DISTINCT o.order_total)` with `count(s.order_id)` over the fanned-out join returned the reference result and was marked correct. Order 105 (customer 2, 20.00, one shipment) now shares a total with order 103, and that query is a known-wrong answer.
+- The `count(*)` wrong answer used to include `sum(DISTINCT)` as well. It now has a correct total, so it fails only because of `count(*)`.
+- Added "Check the other side before you join": a `GROUP BY … HAVING count(*) > 1` query that finds duplicate join keys. No source is needed; the output is checked on the pinned engine.
+
 ## Open questions
 
 None.

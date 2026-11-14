@@ -5,7 +5,7 @@ then write SQL, Python or a data model, and get checked automatically. Everythin
 runs in the browser. There is no backend, no account and no API key.
 
 **Status:** M0 is merged and deployed to GitHub Pages. M1 (the SQL track) is in
-progress on `feat/m1-sql-track`; lessons 01–03 are drafted.
+progress on `main`: lessons 01–02 are reviewed, lesson 03 is a draft.
 
 ## Goals, in priority order
 
