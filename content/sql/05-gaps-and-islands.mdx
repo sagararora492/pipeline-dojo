@@ -1,0 +1,152 @@
+---
+title: Gaps and islands
+summary: Group consecutive rows into streaks and sessions, using row_number() for dates and a running sum of flags for timestamps.
+track: sql
+order: 5
+prerequisites: [sql/running-totals-and-lag]
+estimated_minutes: 25
+status: draft
+sources:
+  - title: "DuckDB docs: date functions"
+    url: https://duckdb.org/docs/2.0/sql/functions/date.html
+    checked: 2026-11-14, DuckDB 2.0 docs; behaviour re-checked on the pinned 1.4.3 engine
+  - title: "DuckDB docs: timestamp functions"
+    url: https://duckdb.org/docs/2.0/sql/functions/timestamp
+    checked: 2026-11-14, DuckDB 2.0 docs; behaviour re-checked on the pinned 1.4.3 engine
+  - title: "PostgreSQL docs: date/time functions and operators"
+    url: https://www.postgresql.org/docs/current/functions-datetime.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "Snowflake docs: DATEADD"
+    url: https://docs.snowflake.com/en/sql-reference/functions/dateadd
+    checked: 2026-11-14
+  - title: "Snowflake docs: DATEDIFF"
+    url: https://docs.snowflake.com/en/sql-reference/functions/datediff
+    checked: 2026-11-14
+  - title: "BigQuery docs: date functions"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions
+    checked: 2026-11-14
+  - title: "BigQuery docs: timestamp functions"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions
+    checked: 2026-11-14
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './05-gaps-and-islands.exercises';
+
+"How long was each login streak?" "Where does one session end and the next
+begin?" Both questions ask you to group rows that are next to each other. The
+groups are called **islands**, and the spaces between them **gaps**. SQL has no
+`GROUP BY consecutive`, so you build a column that is the same for every row of
+an island, and group by that.
+
+This lesson shows two ways to build that column.
+
+## Streaks: date minus row number
+
+Number a user's login days in date order. Inside a run of consecutive days,
+the date goes up by 1 and the row number goes up by 1, so the difference
+between them doesn't change. After a gap, the date jumps ahead but the row
+number doesn't, so the difference changes.
+
+Here are user 1's login days:
+
+| login_date | row_number | login_date − row_number |
+|---|---|---|
+| 2024-07-01 | 1 | 2024-06-30 |
+| 2024-07-02 | 2 | 2024-06-30 |
+| 2024-07-03 | 3 | 2024-06-30 |
+| 2024-07-06 | 4 | 2024-07-02 |
+| 2024-07-07 | 5 | 2024-07-02 |
+
+The third column has no meaning of its own. It only needs to be the same within
+an island and different between islands, so you can group by it:
+
+```sql
+SELECT login_date,
+       login_date - CAST(row_number() OVER (ORDER BY login_date) AS INTEGER) AS island
+FROM login_days;  -- one row per day user 1 logged in
+```
+
+In DuckDB, `row_number()` returns a `BIGINT`, and subtracting a `BIGINT` from a
+`DATE` is an error. Cast the row number to `INTEGER` first.
+
+### Duplicates break the pattern
+
+The trick depends on one row per day. If a user logs in twice on the same day,
+the two rows get different row numbers but have the same date, so they land in
+different islands and the streak splits. Remove duplicate days before you
+number them.
+
+`dense_rank()` gives both copies the same number, which keeps the island
+together. But the duplicate row is still there, so `count(*)` counts that day
+twice.
+
+<SqlExercise exercise={exercises['sql-login-streaks']}>
+  `logins` has one row per login, and a user can log in more than once a day.
+  For each streak of consecutive days, return `user_id`, the first day
+  (`streak_start`), the last day (`streak_end`) and the number of days in the
+  streak (`days`). A single day on its own is a streak of 1.
+</SqlExercise>
+
+## Sessions: flag the starts, then add them up
+
+Dates one day apart have a fixed step. Events don't: two clicks in one session
+can be seconds or minutes apart. Here the rule is a threshold. A new session
+starts when the gap since the previous event is more than 30 minutes.
+
+This takes two steps, both from the previous lesson:
+
+1. Use `lag()` to get the previous event's time, and flag each event that
+   **starts** a session with 1. Every other event gets 0.
+2. Take a **running sum** of the flag. It goes up by 1 at each session start,
+   so every event in a session gets the same number.
+
+Here are user 1's events:
+
+| event_at | gap | starts a session | running sum |
+|---|---|---|---|
+| 09:00:00 | (none) | 1 | 1 |
+| 09:10:00 | 00:10:00 | 0 | 1 |
+| 09:40:00 | 00:30:00 | 0 | 1 |
+| 10:10:40 | 00:30:40 | 1 | 2 |
+| 10:20:00 | 00:09:20 | 0 | 2 |
+
+Two details decide whether the sessions come out right.
+
+**The first event.** It has no previous event, so `lag()` returns NULL and the
+gap is NULL. A NULL gap is not "more than 30 minutes", so the first event isn't
+flagged unless you test for it: `previous_event_at IS NULL OR …`.
+
+**The unit of the gap.** The gap before 10:10:40 is 30 minutes and 40 seconds.
+That is more than 30 minutes, so a new session starts. But
+`date_diff('minute', …)` returns 30 for it, and `30 > 30` is false. DuckDB's
+docs describe `date_diff` as counting the part boundaries between the two
+values, and only 30 minute boundaries are crossed here. Compare the gap as an
+interval, or count it in a unit smaller than your threshold:
+
+```sql
+event_at - previous_event_at > INTERVAL '30 minutes'
+```
+
+<SqlExercise exercise={exercises['sql-sessionize-events']}>
+  A new session starts with a user's first event, and whenever more than 30
+  minutes have passed since that user's previous event. Return `user_id`,
+  `session_number` (1 for the user's first session), `session_start`,
+  `session_end` and the number of `events` in the session.
+</SqlExercise>
+
+## In other databases
+
+| Database | A date minus *n* days | Gap between two timestamps |
+|---|---|---|
+| DuckDB 1.4 | `d - n`, with *n* an `INTEGER` | `t2 - t1` gives an `INTERVAL` |
+| PostgreSQL 18 | `d - n` | `t2 - t1` gives an `interval` |
+| Snowflake | `DATEADD(day, -n, d)` | `DATEDIFF(second, t1, t2)` |
+| BigQuery | `DATE_SUB(d, INTERVAL n DAY)` | `TIMESTAMP_DIFF(t2, t1, SECOND)` |
+
+The unit trap is not specific to DuckDB. Snowflake's docs say `DATEDIFF`
+compares "the specified date or time part, not the complete date or time", and
+BigQuery's say `TIMESTAMP_DIFF` truncates decimals. In both, a gap of 30 minutes
+and 40 seconds measured in minutes is 30. Measure in seconds and compare with
+1800.
