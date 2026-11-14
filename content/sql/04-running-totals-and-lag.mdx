@@ -1,0 +1,163 @@
+---
+title: Running totals and the previous row
+summary: Build running totals that survive tied rows, and compare each row with the one before it using lag().
+track: sql
+order: 4
+prerequisites: [sql/latest-row-per-key]
+estimated_minutes: 20
+status: draft
+sources:
+  - title: "DuckDB docs: window functions"
+    url: https://duckdb.org/docs/2.0/sql/functions/window_functions
+    checked: 2026-11-14, DuckDB 2.0 docs; behaviour re-checked on the pinned 1.4.3 engine
+  - title: "PostgreSQL docs: window function calls"
+    url: https://www.postgresql.org/docs/current/sql-expressions.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "PostgreSQL docs: tutorial, window functions"
+    url: https://www.postgresql.org/docs/current/tutorial-window.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "PostgreSQL docs: window functions (lag, lead)"
+    url: https://www.postgresql.org/docs/current/functions-window.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "Snowflake docs: window function syntax and usage"
+    url: https://docs.snowflake.com/en/sql-reference/functions-window-syntax
+    checked: 2026-11-14
+  - title: "Snowflake docs: LAG"
+    url: https://docs.snowflake.com/en/sql-reference/functions/lag
+    checked: 2026-11-14
+  - title: "BigQuery docs: window function calls"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/window-function-calls
+    checked: 2026-11-14
+  - title: "BigQuery docs: navigation functions (LAG)"
+    url: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/navigation_functions
+    checked: 2026-11-14
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './04-running-totals-and-lag.exercises';
+
+A running total looks like the easiest window function there is: add an
+`ORDER BY` inside `OVER` and the sum accumulates. It works until two rows share
+the same ordering value. Then both rows show the same total, and nothing warns
+you.
+
+The `payments` table below is used throughout. Account A made two payments on
+2024-07-03.
+
+| payment_id | account_id | paid_on | amount |
+|---|---|---|---|
+| 1 | A | 2024-07-01 | 100.00 |
+| 2 | A | 2024-07-03 | 40.00 |
+| 3 | A | 2024-07-03 | 60.00 |
+| 4 | A | 2024-07-05 | 25.00 |
+| 5 | B | 2024-07-02 | 500.00 |
+| 6 | B | 2024-07-04 | 250.00 |
+
+## The frame decides which rows are summed
+
+A window function sees a **frame**: a set of rows around the current row,
+inside its partition. If you don't write a frame, you get a default, and the
+default depends on whether there is an `ORDER BY`:
+
+- **No `ORDER BY`:** the frame is the whole partition.
+  `sum(amount) OVER (PARTITION BY account_id)` puts the account's total on
+  every row.
+- **With `ORDER BY`:** the frame is
+  `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+
+That second default is what makes a running total. It also holds the trap. In
+`RANGE` mode, "current row" means the current row **and its peers**: every row
+with the same `ORDER BY` value. The PostgreSQL docs describe the default frame
+as running from the partition start "up through the current row's last
+`ORDER BY` peer".
+
+```sql
+SELECT payment_id, amount,
+       sum(amount) OVER (PARTITION BY account_id ORDER BY paid_on) AS running_total
+FROM payments
+WHERE account_id = 'A';
+-- 1 | 100.00 | 100.00
+-- 2 |  40.00 | 200.00   <- already includes payment 3
+-- 3 |  60.00 | 200.00
+-- 4 |  25.00 | 225.00
+```
+
+Payments 2 and 3 are peers, so each one's frame includes the other.
+
+## Fix it with a tie-breaker and a `ROWS` frame
+
+In `ROWS` mode, "current row" means just the current row. Add a tie-breaker so
+the order is fully decided, and write the frame out:
+
+```sql
+sum(amount) OVER (
+  PARTITION BY account_id
+  ORDER BY paid_on, payment_id
+  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+)
+```
+
+You need both parts. A `ROWS` frame without the tie-breaker stops at the
+current row, but nothing says whether payment 2 or payment 3 comes first, so
+the totals can differ from one run to the next. The tie-breaker without the
+`ROWS` frame gives the right answer here, because no two rows are peers any
+more. Writing the frame as well means the query says what you meant.
+
+<SqlExercise exercise={exercises['sql-running-total-per-account']}>
+  Return `payment_id`, `account_id`, `amount` and a `running_total` of the
+  account's payments so far, in order of `paid_on` and then `payment_id`.
+  Payment 2 should show 140.00 and payment 3 should show 200.00.
+</SqlExercise>
+
+## `lag()`: look at the previous row
+
+`lag(x)` returns `x` from the previous row of the partition, in the window's
+`ORDER BY` order. `lead(x)` returns it from the next row. Both take an optional
+offset, which defaults to 1, and an optional default value for when there is no
+such row, which defaults to NULL.
+
+The first row of each partition has no previous row, so `lag()` returns NULL
+there. Keep it. NULL says "there is nothing to compare with", which is
+different from "no change". Replacing it with 0 hides that difference.
+
+### Window functions run after `GROUP BY`
+
+To compare one *day* with the previous day, you first need one row per day.
+Window functions are computed after grouping and aggregation, so you can pass
+an aggregate to one in the same query:
+
+```sql
+SELECT account_id, paid_on,
+       sum(amount) AS day_total,
+       lag(sum(amount)) OVER (PARTITION BY account_id ORDER BY paid_on) AS previous_day_total
+FROM payments
+GROUP BY account_id, paid_on;
+```
+
+The PostgreSQL docs put it this way: it is valid to include an aggregate
+function call in the arguments of a window function, but not the other way
+round.
+
+<SqlExercise exercise={exercises['sql-daily-change-per-account']}>
+  For each account and each day it made payments, return `account_id`,
+  `paid_on`, the day's total (`day_total`) and `change_from_previous`: the
+  day's total minus the same account's previous day total. The first day of
+  each account has no previous day, so leave its change as NULL.
+</SqlExercise>
+
+## In other databases
+
+| Database | Default frame with `ORDER BY` | `lag(x)` defaults |
+|---|---|---|
+| DuckDB | `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` | offset 1, default NULL |
+| PostgreSQL 18 | `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` | offset 1, default NULL |
+| Snowflake | `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for functions such as `SUM`, `COUNT`, `MIN` and `MAX` | offset 1, default NULL |
+| BigQuery | `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` | offset 1, default NULL |
+
+All four document the same default frame, so the tied-rows trap is not a DuckDB
+quirk. The DuckDB and PostgreSQL docs state that the frame includes the current
+row's peers. [VERIFY: the Snowflake and BigQuery pages give the same default
+frame but don't describe tied rows in words.]
+
+Snowflake's `LAG` syntax requires an `ORDER BY` in the `OVER` clause.
