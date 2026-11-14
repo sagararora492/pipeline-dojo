@@ -5,7 +5,7 @@ track: sql
 order: 2
 prerequisites: [sql/latest-row-per-key]
 estimated_minutes: 20
-status: draft
+status: reviewed
 sources:
   - title: "PostgreSQL docs: table expressions, joined tables"
     url: https://www.postgresql.org/docs/current/queries-table-expressions.html
@@ -39,8 +39,8 @@ neither one raises an error. A dashboard total that's quietly 60% too high
 usually comes from one of the two mistakes in this lesson.
 
 The `orders` (left) and `shipments` (right) tables below are used throughout. Order 101 was split across two
-shipments, order 103 hasn't shipped, and order 104 is a guest checkout with no
-`customer_id`.
+shipments, order 103 hasn't shipped, order 104 is a guest checkout with no
+`customer_id`, and orders 103 and 105 happen to have the same total.
 
 <div className="table-pair">
 
@@ -50,6 +50,7 @@ shipments, order 103 hasn't shipped, and order 104 is a guest checkout with no
 | 102 | 1 | 30.00 |
 | 103 | 2 | 20.00 |
 | 104 | NULL | 15.00 |
+| 105 | 2 | 20.00 |
 
 | order_id | shipped_at |
 |---|---|
@@ -57,6 +58,7 @@ shipments, order 103 hasn't shipped, and order 104 is a guest checkout with no
 | 101 | 2024-06-03 |
 | 102 | 2024-06-02 |
 | 104 | 2024-06-02 |
+| 105 | 2024-06-04 |
 
 </div>
 
@@ -75,6 +77,7 @@ JOIN shipments AS s ON s.order_id = o.order_id;
 -- 101 | 50.00 | 2024-06-03   <- the same order again
 -- 102 | 30.00 | 2024-06-02
 -- 104 | 15.00 | 2024-06-02
+-- 105 | 20.00 | 2024-06-04
 ```
 
 Sum `order_total` over that result and order 101 counts twice. Before you
@@ -83,7 +86,24 @@ side?** If the answer can be more than one, aggregate the other side down to
 one row per key first, then join.
 
 `sum(DISTINCT order_total)` looks like a fix, but it isn't. It also merges two
-*different* orders that happen to have the same total.
+*different* orders that happen to have the same total. Orders 103 and 105 are
+both 20.00, so customer 2 would total 20.00 instead of 40.00.
+
+### Check the other side before you join
+
+You can test for fan-out instead of guessing. Look for keys that appear more
+than once on the side you're joining to:
+
+```sql
+SELECT order_id, count(*) AS matches
+FROM shipments
+GROUP BY order_id
+HAVING count(*) > 1;
+-- 101 | 2
+```
+
+If this returns any rows, a join on `order_id` will repeat rows from the other
+table.
 
 ### `count(*)` vs `count(column)` after a left join
 
@@ -110,7 +130,7 @@ WHERE customer_id NOT IN (SELECT customer_id FROM orders);
 -- no rows!
 ```
 
-The guest order puts a NULL into the subquery. `3 NOT IN (1, 1, 2, NULL)` asks
+The guest order puts a NULL into the subquery. `3 NOT IN (1, 1, 2, 2, NULL)` asks
 whether 3 is unequal to *every* value, and SQL can't tell whether 3 equals
 NULL. So the result is NULL, not TRUE. The PostgreSQL docs say this directly:
 if no right-hand value is equal and at least one is NULL, `NOT IN` returns

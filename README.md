@@ -7,8 +7,8 @@ datasets, solve Python exercises, step through the algorithms behind data system
 and design data models. Your answers are checked automatically. Everything runs in
 your browser, with no accounts, servers or API keys.
 
-> **Status:** early development. The skeleton works end to end with one sample SQL
-> lesson. The plan is in [CLAUDE.md](CLAUDE.md).
+> **Status:** early development. The SQL track is live with three lessons, and more
+> are added each week. The plan is in [CLAUDE.md](CLAUDE.md).
 
 ## Tracks
 

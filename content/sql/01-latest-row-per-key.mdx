@@ -5,7 +5,7 @@ track: sql
 order: 1
 prerequisites: []
 estimated_minutes: 15
-status: draft
+status: reviewed
 sources:
   - title: "DuckDB docs: QUALIFY clause"
     url: https://duckdb.org/docs/current/sql/query_syntax/qualify.html
@@ -48,6 +48,11 @@ The usual pattern has two steps:
 `row_number()` gives every row in a partition a different number, even when
 two rows are identical. That's what removes the duplicate delivery. `rank()`
 gives tied rows the same rank, so both copies would survive.
+
+The same trap catches a common alternative: keeping each row whose
+`updated_at` equals the maximum for its key, with a correlated subquery or a
+join to a `GROUP BY`. Every row that shares the latest timestamp matches, so a
+duplicate delivery comes through twice.
 
 You can't filter on a window function in `WHERE`, because `WHERE` runs before
 window functions are computed. DuckDB has a `QUALIFY` clause that filters on

@@ -26,7 +26,12 @@ The old `duckdb.org/docs/stable/...` and `cloud.google.com/bigquery/...` URLs no
 - **PostgreSQL 18.6** has no `QUALIFY`: the SELECT synopsis has `WHERE`, `GROUP BY`, `HAVING` and `WINDOW`, but no `QUALIFY`. It lists `DISTINCT ON` as "an extension of the SQL standard".
 - **Snowflake:** `QUALIFY` "requires at least one window function" in the SELECT list or the QUALIFY predicate.
 - **BigQuery:** "A window function is required to be present in the QUALIFY clause or the SELECT list." There is no longer any requirement for a `WHERE`, `GROUP BY` or `HAVING` clause.
-- **Checked by CI:** every behaviour the exercise depends on is covered by the wrong answers in `01-latest-row-per-key.exercises.ts`: `row_number()` removes the duplicate delivery but `rank()` doesn't, and `max()` on each column mixes values from different rows.
+- **Checked by CI:** every behaviour the exercise depends on is covered by the wrong answers in `01-latest-row-per-key.exercises.ts`: `row_number()` removes the duplicate delivery but `rank()` doesn't, `max()` on each column mixes values from different rows, and matching rows to `max(updated_at)` per key keeps both copies of a duplicated latest change.
+
+## Review (2026-11-02)
+
+- Added the "match the max timestamp" wrong answer and a paragraph about it. It's the most common hand-written alternative to `row_number()`, and it has the same failure as `rank()`. No new source is needed: it follows from `=` matching every row with that value, and CI checks it.
+- The exercise data has no tie between two *different* rows, on purpose. Without a tie-breaker the result would be nondeterministic and the checker couldn't grade it reliably. The lesson covers that case in prose instead.
 
 ## Resolved questions
 

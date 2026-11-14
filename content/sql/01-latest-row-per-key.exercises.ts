@@ -51,6 +51,10 @@ export const exercises = defineSqlExercises({
         sql: `SELECT * FROM order_changes QUALIFY row_number() OVER (ORDER BY updated_at DESC) = 1`,
       },
       {
+        why: 'Matching each row to its order\'s max(updated_at) keeps every row that shares that timestamp, so both copies of order 2\'s duplicated change survive.',
+        sql: `SELECT * FROM order_changes c WHERE updated_at = (SELECT max(updated_at) FROM order_changes m WHERE m.order_id = c.order_id)`,
+      },
+      {
         why: 'rank() gives both copies of the duplicated latest change rank 1, so order 2 appears twice.',
         sql: `SELECT * FROM order_changes QUALIFY rank() OVER (PARTITION BY order_id ORDER BY updated_at DESC) = 1`,
       },
