@@ -1,0 +1,135 @@
+---
+title: Point-in-time joins
+summary: Join each fact to the version of a history table that was valid when the fact happened, without losing or doubling rows.
+track: sql
+order: 7
+prerequisites: [sql/joins-that-change-row-counts, sql/history-tables-scd2]
+estimated_minutes: 20
+status: draft
+sources:
+  - title: "Kimball Group: dimensional modeling techniques, Type 2: add new row"
+    url: https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/type-2/
+    checked: 2026-11-14
+  - title: "PostgreSQL docs: comparison functions and operators (BETWEEN)"
+    url: https://www.postgresql.org/docs/current/functions-comparison.html
+    checked: 2026-11-14, PostgreSQL 18.7
+  - title: "DuckDB docs: AsOf join"
+    url: https://duckdb.org/docs/2.0/guides/sql_features/asof_join.html
+    checked: 2026-11-14, DuckDB 2.0 docs; behaviour re-checked on the pinned 1.4.3 engine
+  - title: "Snowflake docs: ASOF JOIN"
+    url: https://docs.snowflake.com/en/sql-reference/constructs/asof-join
+    checked: 2026-11-14
+verified_against:
+  duckdb: 1.4.3 (duckdb-wasm 1.32.0)
+---
+
+import { exercises } from './07-point-in-time-joins.exercises';
+
+"Revenue by plan" sounds like one join. But a customer who is on the team plan
+today may have been on the free plan when last year's invoices were issued. If
+you join invoices to the customer's **current** plan, old revenue moves to
+whatever plan the customer has now, and last year's report changes every time
+somebody upgrades.
+
+A point-in-time join matches each fact to the version that was valid **when the
+fact happened**.
+
+The lesson uses `customer_plan_history` from the previous lesson (its
+`is_current` column isn't shown here) and an `invoices` table:
+
+<div className="table-pair">
+
+| customer_id | plan | valid_from | valid_to |
+|---|---|---|---|
+| 1 | free | 2024-01-10 | 2024-03-01 |
+| 1 | pro | 2024-03-01 | 2024-06-15 |
+| 1 | team | 2024-06-15 | NULL |
+| 2 | pro | 2024-02-20 | 2024-05-05 |
+| 2 | free | 2024-05-05 | NULL |
+| 3 | team | 2024-04-01 | NULL |
+| 4 | team | 2024-01-05 | NULL |
+
+| invoice_id | customer_id | invoiced_on | amount |
+|---|---|---|---|
+| 1 | 1 | 2024-02-01 | 10.00 |
+| 2 | 1 | 2024-03-01 | 25.00 |
+| 3 | 1 | 2024-07-01 | 30.00 |
+| 4 | 2 | 2024-03-15 | 45.00 |
+| 5 | 2 | 2024-06-01 | 50.00 |
+| 6 | 3 | 2024-03-10 | 80.00 |
+
+</div>
+
+## Join on the key and the date range
+
+The join condition has two parts: the same customer, and the invoice date
+inside the version's range.
+
+```sql
+SELECT i.invoice_id, h.plan
+FROM invoices AS i
+LEFT JOIN customer_plan_history AS h
+  ON h.customer_id = i.customer_id
+ AND i.invoiced_on >= h.valid_from
+ AND (i.invoiced_on < h.valid_to OR h.valid_to IS NULL);
+```
+
+Each part of that condition guards against a different mistake.
+
+- **`>=` and `<`, not `BETWEEN`.** Invoice 2 was issued on 2024-03-01, the day
+  customer 1 moved from free to pro. `BETWEEN` includes both ends, so the
+  invoice would match both versions and appear twice. That is the fan-out from
+  lesson 2, and it inflates revenue the same way.
+- **`OR h.valid_to IS NULL`.** Invoices 3 and 5 fall in current versions, whose
+  `valid_to` is NULL. Without this branch they match nothing.
+- **Everything in `ON`, with a `LEFT JOIN`.** Invoice 6 is dated before
+  customer 3's first version, so no version matches. A `LEFT JOIN` keeps the
+  invoice with a NULL plan. If you move the range test into `WHERE`, it runs
+  after the join and removes that row again.
+
+<SqlExercise exercise={exercises['sql-plan-at-invoice-time']}>
+  Return `invoice_id`, `customer_id` and the plan the customer was on when the
+  invoice was issued (`plan_at_invoice`). Return every invoice once. If no
+  version covers the invoice date, the plan is NULL.
+</SqlExercise>
+
+## Check the totals
+
+A point-in-time join should return exactly one row per fact. The quickest test
+is a total: the invoices add up to 240.00, so revenue grouped by plan must add
+up to 240.00 too. More means an invoice matched two versions. Less means an
+invoice was dropped.
+
+<SqlExercise exercise={exercises['sql-revenue-by-plan-at-invoice']}>
+  Return the revenue (`revenue`) for each plan, using the plan the customer
+  was on when each invoice was issued (`plan_at_invoice`). Invoices with no
+  matching version belong in a group with a NULL plan.
+</SqlExercise>
+
+## In other databases
+
+The range join above uses only a `LEFT JOIN` and comparison operators, with
+nothing specific to DuckDB. [VERIFY: it has not been run on Snowflake or
+BigQuery.]
+
+DuckDB and Snowflake also document an **as-of join**, which finds the latest
+row at or before a timestamp. It needs only the start of each version:
+
+```sql
+-- DuckDB
+SELECT i.invoice_id, h.plan
+FROM invoices AS i
+ASOF LEFT JOIN customer_plan_history AS h
+  ON h.customer_id = i.customer_id
+ AND i.invoiced_on >= h.valid_from;
+```
+
+On this data it returns the same rows as the range join. In Snowflake the
+inequality goes in a separate clause:
+`ASOF JOIN h MATCH_CONDITION (i.invoiced_on >= h.valid_from) ON i.customer_id = h.customer_id`.
+Snowflake's docs say unmatched left rows are "null-padded". In DuckDB a plain
+`ASOF JOIN` drops them, and `ASOF LEFT JOIN` keeps them.
+
+An as-of join ignores `valid_to`. If a history table has a real gap, where a
+version ended and nothing replaced it, an as-of join still matches the ended
+version. The range join returns no match.
